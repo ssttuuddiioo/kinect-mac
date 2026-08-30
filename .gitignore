@@ -1,0 +1,21 @@
+# Third-party source, cloned by build.sh (13 MB)
+libfreenect2/
+
+# Syphon.framework, copied from TouchDesigner by build.sh.
+# The public Syphon SDK is x86_64-only; TD ships a universal build.
+vendor/
+
+# Build artifacts
+*.dylib
+__pycache__/
+*.pyc
+
+# Runtime output
+logs/
+*.log
+soak.out
+
+# Superseded working copies
+*.v1-only
+*.depth-only
+*.prefilter
