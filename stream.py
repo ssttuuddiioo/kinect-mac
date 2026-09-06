@@ -22,12 +22,13 @@ viewers cost bandwidth but not CPU.
 
 import argparse
 import ctypes
+import os
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, "/Users/pablognecco/kinect-check")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from depth_view import Sensor
 
 TURBO = "/opt/homebrew/lib/libturbojpeg.dylib"

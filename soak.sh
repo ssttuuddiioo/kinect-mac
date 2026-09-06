@@ -58,7 +58,15 @@ echo "$(stamp)  SUPERVISOR    soak started, pid $$" >> "$SUP"
 child=""
 stop() {
     echo "$(stamp)  SUPERVISOR    stopped by user after $run run(s)" >> "$SUP"
-    [ -n "$child" ] && kill "$child" 2>/dev/null
+    # SIGTERM, never -9: the app must close the device or the next process to
+    # open it hangs in k2_open.
+    if [ -n "$child" ]; then
+        kill -TERM "$child" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6 7 8; do
+            kill -0 "$child" 2>/dev/null || break
+            sleep 1
+        done
+    fi
     echo; echo "stopped - see $SUP"
     exit 0
 }
@@ -73,9 +81,14 @@ while true; do
     echo "$(stamp)  SUPERVISOR    run #$run starting" >> "$SUP"
 
     # -i no idle sleep, -s no system sleep. Display may still sleep, which is fine.
-    # Background + wait, so Ctrl-C runs the trap immediately instead of
-    # being deferred until the viewer exits on its own.
-    caffeinate -is "$PY" "$HERE/kinect_app.py" >> "$LOGS/stderr-$(date +%Y%m%d).log" 2>&1 &
+    # caffeinate must NOT be the parent: killing it would leave python running
+    # as an orphan holding the sensor. -w makes it hold the sleep assertion for
+    # as long as this supervisor lives, independently of the app.
+    caffeinate -is -w $$ &
+
+    # Background + wait, so Ctrl-C runs the trap immediately instead of being
+    # deferred until the app exits on its own.
+    "$PY" "$HERE/kinect_app.py" >> "$LOGS/stderr-$(date +%Y%m%d).log" 2>&1 &
     child=$!
     wait "$child"
     code=$?
