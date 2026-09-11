@@ -116,6 +116,12 @@ tracking resumes on its own. Each restart is logged as `TRACKER_RESTART` in the
 health log, with the reason. Frames reach the child through shared memory, and
 the camera thread never waits on it.
 
+MediaPipe's crash would normally pop up macOS's "Python quit unexpectedly"
+dialog each time. The child installs a small native handler (`crashguard.c`) that
+turns the crash into a quiet exit instead, so there's no dialog — just the
+restart, logged. Set `KINECT_CHILD_CRASH_REPORTS=1` if you want the crash
+reports back for debugging.
+
 See [REVIEW.md](REVIEW.md) for how this was found and tested.
 
 ## Why it's built this way

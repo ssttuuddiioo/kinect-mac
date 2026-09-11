@@ -626,6 +626,20 @@ def _send(fd, msg):
     os.write(fd, struct.pack("<I", len(data)) + data)
 
 
+def _install_crashguard():
+    """Turn MediaPipe's periodic abort into a quiet exit, so macOS doesn't
+    show "Python quit unexpectedly" each time. See crashguard.c. Set
+    KINECT_CHILD_CRASH_REPORTS=1 to keep the crash reports for debugging."""
+    if os.environ.get("KINECT_CHILD_CRASH_REPORTS") == "1":
+        return
+    import ctypes
+    lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libcrashguard.dylib")
+    try:
+        ctypes.CDLL(lib).crashguard_install()
+    except OSError:
+        pass            # not built: dialogs appear, recovery still works
+
+
 def _child_main(shm_name, h, w, port, out_fd):
     """Child entry point (tracker.py --child): attach to the frame buffer by
     name, run a Tracker, report back over out_fd. Runs as a plain subprocess,
@@ -635,6 +649,7 @@ def _child_main(shm_name, h, w, port, out_fd):
     import mmap
     import signal
     signal.signal(signal.SIGINT, signal.SIG_IGN)     # the parent owns Ctrl-C
+    _install_crashguard()
     col_at, col_n, dep_at, total = _layout(h, w)
     fd = _posixshmem.shm_open("/" + shm_name, os.O_RDWR, mode=0o600)
     buf = mmap.mmap(fd, total)
@@ -678,6 +693,25 @@ def _child_main(shm_name, h, w, port, out_fd):
     tr.close()
     buf.close()
     os._exit(0)        # don't wait on MediaPipe's non-daemon threads on the way out
+
+
+def _describe_exit(code):
+    """Readable restart reason. 128+N is crashguard's quiet exit for signal N;
+    a negative code is a process killed by that signal outright."""
+    import signal as _signal
+    if code is not None and code > 128:
+        n, how = code - 128, "exited quietly after"
+    elif code is not None and code < 0:
+        n, how = -code, "killed by"
+    else:
+        return "tracker process died (exit %s)" % code
+    try:
+        name = _signal.Signals(n).name
+    except ValueError:
+        name = "signal %d" % n
+    if name == "SIGABRT":
+        return "MediaPipe aborted (its known macOS GPU fault) - %s %s" % (how, name)
+    return "tracker process %s %s" % (how, name)
 
 
 class TrackerProcess:
@@ -892,7 +926,7 @@ class TrackerProcess:
                 now = time.monotonic()
                 reason = None
                 if c["proc"].poll() is not None:
-                    reason = "tracker process died (exit %s)" % c["proc"].returncode
+                    reason = _describe_exit(c["proc"].returncode)
                 elif not self._ready and now - c["born"] > self.LOAD_TIMEOUT:
                     reason = "models did not load in %.0f s" % self.LOAD_TIMEOUT
                 elif (self._ready and now - self.last_submit < 1.0

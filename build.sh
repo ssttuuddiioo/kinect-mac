@@ -100,6 +100,7 @@ clang++ -ObjC++ -std=c++11 -O2 -fobjc-arc -dynamiclib -o "$HERE/libk2syphon.dyli
     -Wno-deprecated-declarations -Wl,-rpath,"$HERE/vendor"
 
 clang++ -std=c++11 -O2 -dynamiclib -o "$HERE/libkproc.dylib" "$HERE/kproc.cpp"
+clang -O2 -dynamiclib -o "$HERE/libcrashguard.dylib" "$HERE/crashguard.c"
 
 cd "$HERE"
 echo "==> Femto-sized test image"

@@ -34,6 +34,19 @@ memory now lives in the child. Tests: `test_tracker_process.py`,
 **Still true:** each failure costs a visible gap — about 2–3 s after an abort,
 about 8–9 s after a wedge — every few minutes. See *Not fixed*.
 
+### Follow-up — "Python quit unexpectedly" every few minutes
+Once tracking was isolated, MediaPipe's periodic abort no longer affected the
+app — but each one killed the child with SIGABRT, and because Homebrew's Python
+runs from a `Python.app` bundle, macOS showed a crash dialog and filed a report
+for every one. The reports confirmed it: the child process, `EXC_CRASH SIGABRT`,
+raised inside `libmediapipe` from `Image::ConvertToGpu`, roughly every 5½
+minutes. **Fix:** `crashguard.c`, a native handler installed **in the child only**,
+turns a fatal signal into a normal `_exit(128 + signal)` — no dialog, no report,
+and the restart reason still says exactly what happened. A Python handler can't
+do this, since `abort()` re-raises regardless. The app itself is deliberately left
+unguarded, so its own crashes stay visible. Set `KINECT_CHILD_CRASH_REPORTS=1` to
+get the reports back for debugging. Test: `test_tracker_process.py` [F].
+
 ### High — use-after-free when the camera stalls, and on quit
 Stall recovery closed the camera from the UI thread while the capture thread
 was blocked inside `frame()` — in the C backends, freeing the device that thread

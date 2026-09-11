@@ -71,7 +71,7 @@ def main():
     time.sleep(0.5)
     back = wait_flowing(45, t_kill + 0.5); gap = time.monotonic() - t_kill
     check("tracking recovers by itself", back, "gap %.1f s" % gap)
-    check("restart recorded with the reason", tp.restarts == 1 and "died" in (tp.restart_reason or ""),
+    check("restart recorded with the reason", tp.restarts == 1 and "SIGKILL" in (tp.restart_reason or ""),
           "restarts=%d reason=%s" % (tp.restarts, tp.restart_reason))
     check("a new child, not the old one", tp._child["proc"].pid != child_pid)
 
@@ -119,6 +119,20 @@ def main():
           "gone %.1f s after parent killed" % gone_in if gone_in else "STILL RUNNING")
     if gone_in is None:
         os.kill(orphan_pid, signal.SIGKILL)
+
+    print("\n[F] MediaPipe's abort exits quietly - no 'Python quit unexpectedly'")
+    reports = os.path.expanduser("~/Library/Logs/DiagnosticReports")
+    count = lambda: sum(1 for f in os.listdir(reports) if f.startswith("Python"))
+    before, pid = count(), tp._child["proc"].pid
+    os.kill(pid, signal.SIGABRT); t_abort = time.monotonic()   # what MediaPipe does
+    time.sleep(0.5)
+    back = wait_flowing(45, t_abort + 0.5)
+    check("tracking recovers after an abort", back, "gap %.1f s" % (time.monotonic() - t_abort))
+    check("child exited quietly, not killed by the signal",
+          "exited quietly after SIGABRT" in (tp.restart_reason or ""), tp.restart_reason)
+    time.sleep(3.0)                                            # ReportCrash is asynchronous
+    check("no macOS crash report (so no dialog)", count() == before,
+          "%d new" % (count() - before))
 
     print("\n[E] close() leaves nothing running")
     last_pid = tp._child["proc"].pid
