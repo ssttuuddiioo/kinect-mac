@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from camera import open_camera
+from camera import detect, open_camera
 from stream import Jpeg, BOUNDARY
 from syphon_out import Syphon, DEPTH, COLOUR, CLOUD
 
@@ -180,7 +180,11 @@ class App:
         # --- 3. sensor, with a Retry path. Missing hardware is the normal case
         # here, not an error worth a traceback - the sensor drops off USB
         # regularly and the user just replugs it.
-        self.open_sensor()
+        self.chooser = None
+        if self.camera_kind == "ask":
+            self.show_chooser()
+        else:
+            self.open_sensor()
 
         root.protocol("WM_DELETE_WINDOW", self.quit)
         root.bind("<Escape>", lambda _e: self.quit())
@@ -188,6 +192,80 @@ class App:
         signal.signal(signal.SIGTERM, lambda _s, _f: self.quit())
         signal.signal(signal.SIGINT, lambda _s, _f: self.quit())
         self.tick()
+
+    # --- camera chooser -----------------------------------------------------
+
+    CAMERAS = (("femto", "Orbbec Femto Mega"),
+               ("kinect", "Kinect v2"),
+               ("synthetic", "Test pattern  (no camera)"))
+
+    def show_chooser(self, message=""):
+        """Ask which camera to run, showing what is actually plugged in."""
+        if self.chooser is not None:
+            self.chooser.destroy()
+        found = detect()
+        root_user = os.geteuid() == 0
+
+        box = tk.Frame(self.root, bg=BG, padx=26, pady=22,
+                       highlightthickness=1, highlightbackground="#2c3038")
+        box.place(in_=self.canvas, relx=0.5, rely=0.5, anchor="center")
+        self.chooser = box
+
+        tk.Label(box, text="Choose a camera", bg=BG, fg=FG, anchor="w",
+                 font=("Helvetica Neue", 19, "bold")).pack(fill="x")
+        tk.Label(box, text=message or "Detected devices are marked.", bg=BG,
+                 fg=RED if message else DIM, anchor="w", justify="left",
+                 wraplength=360, font=("Helvetica Neue", 11)).pack(fill="x", pady=(2, 14))
+
+        for kind, label in self.CAMERAS:
+            row = tk.Frame(box, bg=BG)
+            row.pack(fill="x", pady=3)
+            tk.Button(row, text=label, width=24, anchor="w",
+                      command=lambda k=kind: self.choose(k),
+                      highlightbackground=BG,
+                      font=("Helvetica Neue", 13)).pack(side="left")
+            if kind == "synthetic":
+                note, colour = "no hardware", DIM
+            elif found.get(kind):
+                note, colour = "plugged in", GREEN
+                if kind == "femto" and not root_user:
+                    note = "plugged in - needs root"
+                    colour = AMBER
+            else:
+                note, colour = "not detected", DIM
+            tk.Label(row, text=note, bg=BG, fg=colour,
+                     font=("Helvetica Neue", 11)).pack(side="left", padx=(10, 0))
+
+        if found.get("femto") and not root_user:
+            tk.Label(box, text="Choosing the Femto Mega reopens this app in Terminal "
+                               "with sudo - macOS won't let it open the camera otherwise.",
+                     bg=BG, fg=DIM, anchor="w", justify="left", wraplength=360,
+                     font=("Helvetica Neue", 10)).pack(fill="x", pady=(10, 0))
+
+        tk.Button(box, text="Rescan", command=self.show_chooser,
+                  highlightbackground=BG,
+                  font=("Helvetica Neue", 11)).pack(anchor="e", pady=(12, 0))
+        self.status.configure(text="waiting for a camera choice", fg=DIM)
+        self.log.write("CHOOSER", "detected %s" % found)
+
+    def choose(self, kind):
+        if kind == "femto" and os.geteuid() != 0:
+            # Can't take the camera without root. Hand over to the sudo
+            # launcher in Terminal, which prompts for the password, then quit
+            # - nothing has been opened yet, so there is nothing to release.
+            import subprocess
+            launcher = os.path.join(HERE, "Run Femto Mega.command")
+            self.log.write("CHOOSER", "femto chosen without root - relaunching via Terminal")
+            subprocess.Popen(["open", launcher])
+            self.quit()
+            return
+        if self.chooser is not None:
+            self.chooser.destroy()
+            self.chooser = None
+        self.camera_kind = kind
+        self.asked = True
+        self.log.write("CHOOSER", "chose %s" % kind)
+        self.open_sensor()
 
     def adopt_resolution(self, sensor):
         """Size everything to this camera. The Femto Mega's depth is 640x576
@@ -214,10 +292,18 @@ class App:
                                  synthetic_size=self.synthetic_size)
             sensor.enable_cloud(True)
         except Exception as exc:
-            hint = ("Femto Mega: run with sudo, and quit TD's Orbbec TOP"
-                    if self.camera_kind == "femto" else
-                    "plug in the camera (Kinect also needs its 12V power)")
-            self.status.configure(text="No camera - %s, then Retry" % hint, fg=RED)
+            if self.camera_kind == "auto":
+                # detect() already produced a specific reason - show it as-is
+                msg = str(exc)
+            elif self.camera_kind == "femto":
+                msg = "Femto Mega: run with sudo, and quit TD's Orbbec TOP"
+            else:
+                msg = "plug in the Kinect and its 12V power"
+            self.status.configure(text="%s - then Retry" % msg[:88], fg=RED)
+            if getattr(self, "asked", False):
+                self.show_chooser("Couldn't open that camera: %s" % str(exc)[:160])
+                self.log.write("SENSOR_FAIL", str(exc))
+                return
             self.retry.pack(side="left", padx=(0, 10))
             self.status.pack_forget()
             self.status.pack(side="left")
@@ -423,9 +509,10 @@ class App:
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Depth camera -> Syphon / MJPEG")
-    ap.add_argument("--camera", default="auto",
-                    choices=("auto", "kinect", "femto", "synthetic"),
-                    help="auto tries the Femto Mega, then the Kinect v2")
+    ap.add_argument("--camera", default="ask",
+                    choices=("ask", "auto", "kinect", "femto", "synthetic"),
+                    help="ask shows a chooser (default); auto picks by what's "
+                         "plugged in, for unattended runs")
     ap.add_argument("--size", default="640x576",
                     help="synthetic camera resolution, WxH")
     ap.add_argument("--mjpeg", action="store_true",

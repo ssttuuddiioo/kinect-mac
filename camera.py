@@ -276,6 +276,44 @@ class SyntheticCamera:
         self.proc.close()
 
 
+# --- what's physically plugged in ---------------------------------------------
+
+ORBBEC_VID = 0x2BC5
+KINECT_V2 = {(0x045E, 0x02C4), (0x045E, 0x02D8), (0x045E, 0x02D9)}
+
+
+def usb_devices():
+    """(vid, pid) of everything on the USB bus, from the IOKit registry.
+
+    Uses ioreg rather than libusb. libusb's enumeration drops a device that
+    another process holds exclusively - with TouchDesigner's Orbbec TOP open,
+    it reported an empty bus while the Femto Mega was plugged in. ioreg reads
+    the registry macOS itself uses, needs no privileges, and lists a device
+    regardless of who has it open.
+    """
+    import re
+    import subprocess
+    try:
+        out = subprocess.run(["ioreg", "-p", "IOUSB", "-l", "-w0"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return set()
+    found = set()
+    for block in out.split("+-o "):
+        vid = re.search(r'"idVendor" = (\d+)', block)
+        pid = re.search(r'"idProduct" = (\d+)', block)
+        if vid and pid:
+            found.add((int(vid.group(1)), int(pid.group(1))))
+    return found
+
+
+def detect():
+    """Which supported cameras are plugged in, by USB id. Needs no root."""
+    present = usb_devices()
+    return {"femto": any(v == ORBBEC_VID for v, _ in present),
+            "kinect": bool(present & KINECT_V2)}
+
+
 # --- factory -----------------------------------------------------------------
 
 def open_camera(kind="auto", colour=True, synthetic_size=(640, 576)):
@@ -290,11 +328,18 @@ def open_camera(kind="auto", colour=True, synthetic_size=(640, 576)):
         cam.kind = "kinect"
         return cam
     if kind == "auto":
-        errors = []
-        for k in ("femto", "kinect"):
-            try:
-                return open_camera(k, colour)
-            except Exception as exc:
-                errors.append("%s: %s" % (k, exc))
-        raise RuntimeError("no camera found - " + " | ".join(errors))
+        found = detect()
+        root = os.geteuid() == 0
+        if found["femto"] and root:
+            return open_camera("femto", colour)
+        if found["kinect"]:
+            if found["femto"]:
+                print("auto: Femto Mega also plugged in, but it needs root - "
+                      "using the Kinect", flush=True)
+            return open_camera("kinect", colour)
+        if found["femto"]:
+            raise RuntimeError("Femto Mega is plugged in, but on macOS it needs "
+                               "root - use 'Run Femto Mega.command'")
+        raise RuntimeError("no camera plugged in (looked for a Femto Mega and "
+                           "a Kinect v2)")
     raise ValueError("unknown camera kind %r" % kind)

@@ -12,7 +12,7 @@
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PY=/opt/homebrew/bin/python3.14
+PY="$HERE/.venv/bin/python"
 LOGS="$HERE/logs"
 SUP="$LOGS/supervisor.log"
 mkdir -p "$LOGS"
@@ -88,7 +88,7 @@ while true; do
 
     # Background + wait, so Ctrl-C runs the trap immediately instead of being
     # deferred until the app exits on its own.
-    "$PY" "$HERE/kinect_app.py" >> "$LOGS/stderr-$(date +%Y%m%d).log" 2>&1 &
+    "$PY" "$HERE/kinect_app.py" --camera auto >> "$LOGS/stderr-$(date +%Y%m%d).log" 2>&1 &
     child=$!
     wait "$child"
     code=$?
