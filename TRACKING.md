@@ -25,10 +25,12 @@ One float per address, so every value is its own clean CHOP channel.
 | `/pose/<joint>/tx`, `/ty`, `/tz` | metres, TD space: Y up, −Z forward |
 | `/pose/<joint>/v` | visibility, 0–1 |
 | `/hand/left/present`, `/hand/right/present` | 1 while that hand is tracked |
+| `/hand/<side>/open` | **1 while the hand is open, 0 when closed** — the on/off switch |
+| `/hand/<side>/openness` | 0 = fist … 1 = fully open, continuous |
 | `/hand/<side>/x`, `/y` | palm, 0–1 across the image, mirrored like the feeds |
 | `/hand/<side>/tx`, `/ty`, `/tz` | palm, metres, TD space |
 
-Hands send **where the hand is** and nothing more: six channels each. The palm
+Hands send **where the hand is and whether it's open**: eight channels each. The palm
 point is the wrist and four knuckles averaged, which stays put while fingers
 bend — far steadier than any fingertip.
 
@@ -60,6 +62,36 @@ on the cloud. Select `pose/*/tx`, `pose/*/ty`, `pose/*/tz`, run each through a
 Shuffle CHOP set to sequence all channels (33 channels of 1 sample → 1 channel
 of 33 samples), merge them into `tx ty tz`, and instance small spheres from that
 in the same Render TOP as the cloud.
+
+**Open = on, closed = off.** `hand/right/open` is 1 while your right hand is
+open and 0 while it's closed — wire it straight to whatever you're switching.
+For a one-shot event at the moment you open (rather than a state), put a
+**Trigger CHOP** or a **Logic CHOP** set to *off to on* after it.
+
+It's worked out from how far your fingertips are from your palm, not from
+MediaPipe's gesture labels: on clearly open hands the gesture model returned
+`None`, which would have read as "not open". The measurement uses MediaPipe's
+3D hand coordinates, so it still works with your hand turned sideways.
+
+It has two thresholds, not one: it switches **on above 0.75** openness and only
+back **off below 0.45**. A single threshold chatters on/off/on when a hand
+hovers near it; with a gap between the two it holds its state until you clearly
+open or close. Calibrated on reference photos:
+
+| Hand | openness | |
+|---|---|---|
+| fist | 0.00 | off |
+| thumbs up | ~0.00 | off — the thumb is ignored |
+| pointing | ~0.28 | off |
+| victory (two fingers) | ~0.72 | in the gap: keeps its state |
+| open | 0.84–0.99 | on |
+
+To move the switch points, change `OPEN_ON` and `OPEN_OFF` at the top of
+`tracker.py`. `openness` itself is continuous, for fading things rather than
+switching them.
+
+In the app's preview, a **filled** dot means the hand is reading open (sending
+1) and a **ring** means closed (sending 0).
 
 **Push and pull.** `tz` is metric depth. A hand moving toward the camera is
 `tz` rising toward zero — something 2D tracking can't give you.

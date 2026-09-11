@@ -28,6 +28,8 @@ OSC layout (one float per address, so TD's OSC In CHOP gets clean channels):
   /pose/<joint>/tx /ty /tz           metres, TD space (Y up, -Z forward)
   /pose/<joint>/v                    visibility 0-1
   /hand/<left|right>/present
+  /hand/<side>/open                  1 while the hand is open, 0 when closed
+  /hand/<side>/openness              0 = fist .. 1 = fully open, continuous
   /hand/<side>/x /y                  palm, 0-1 across the image (mirrored)
   /hand/<side>/tx /ty /tz            palm, metres, TD space
   (palm = wrist + four knuckles averaged, steadier than any fingertip.
@@ -63,6 +65,20 @@ HAND_JOINTS = (
 GESTURES = ("None", "Closed_Fist", "Open_Palm", "Pointing_Up",
             "Thumb_Down", "Thumb_Up", "Victory", "ILoveYou")
 TORSO = (11, 12, 23, 24)            # shoulders and hips: the body's depth
+TIPS = (8, 12, 16, 20)              # fingertips; the thumb is left out - it moves
+                                    # independently and a thumbs-up is still a fist
+
+# Hand openness = mean fingertip-to-palm distance / (wrist -> middle knuckle),
+# measured in MediaPipe's metric hand-space coords so it survives the hand
+# turning sideways. Calibrated on reference photos:
+#   fist 0.30   thumbs-up 0.28   pointing 0.48   victory 0.77   open 0.85-0.93
+OPEN_RATIO_CLOSED = 0.30            # -> openness 0
+OPEN_RATIO_OPEN = 0.95              # -> openness 1
+# Hysteresis: switch on above ON, only back off below OFF. A single threshold
+# would chatter on a hand held half-open; this holds its state until you
+# clearly open or close. Victory (0.72) sits in the gap and keeps its state.
+OPEN_ON = 0.75
+OPEN_OFF = 0.45
 PALM = (0, 5, 9, 13, 17)            # wrist + knuckles: steadier than a fingertip
 BONES = ((11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (11, 23), (12, 24),
          (23, 24), (23, 25), (25, 27), (24, 26), (26, 28))
@@ -193,6 +209,18 @@ def unproject(xs, ys, z_mm, w, h, K):
     v = np.asarray(ys) * h - 0.5
     z = np.asarray(z_mm) / 1000.0
     return (u - cx) * z / fx, -((v - cy) * z / fy), -z
+
+
+def hand_openness(world):
+    """0 = fist, 1 = fully open, from MediaPipe's metric hand landmarks."""
+    p = np.array([[q.x, q.y, q.z] for q in world])
+    scale = np.linalg.norm(p[9] - p[0])
+    if scale <= 1e-6:
+        return 0.0
+    centre = p[list(PALM)].mean(0)
+    ratio = np.mean([np.linalg.norm(p[t] - centre) for t in TIPS]) / scale
+    return float(np.clip((ratio - OPEN_RATIO_CLOSED)
+                         / (OPEN_RATIO_OPEN - OPEN_RATIO_CLOSED), 0.0, 1.0))
 
 
 # --- tracker ------------------------------------------------------------------
@@ -336,7 +364,8 @@ class Tracker:
                     continue
                 z = np.where(np.isnan(z), palm if not np.isnan(palm) else near, z)
                 g = r.gestures[i][0].category_name if r.gestures and r.gestures[i] else "None"
-                seen[side] = (xs, ys, z, g)
+                opn = hand_openness(r.hand_world_landmarks[i]) if r.hand_world_landmarks else 0.0
+                seen[side] = (xs, ys, z, g, opn)
         hands_overlay = []
         for side in ("left", "right"):
             out += self._emit_hand(side, seen.get(side), w, h, K, now)
@@ -344,7 +373,8 @@ class Tracker:
                 xs, ys = seen[side][0], seen[side][1]
                 if not self.hand_detail:            # just the palm
                     xs, ys = np.array([xs[list(PALM)].mean()]), np.array([ys[list(PALM)].mean()])
-                hands_overlay.append((side, 1.0 - xs, ys))
+                state = self.state.get("palm_" + side, {}).get("open", False)
+                hands_overlay.append((side, 1.0 - xs, ys, state))
 
         # the preview is mirrored like every other output
         self.overlay = {"pose": (1.0 - body[0], body[1]) if body else None,
@@ -386,7 +416,7 @@ class Tracker:
             return self._emit_palm(side, hand, w, h, K, now)
         g = self._group("hand_" + side)
         if hand:
-            xs, ys, z, gesture = hand
+            xs, ys, z, gesture, _opn = hand
             pxs = np.append(xs, xs[list(PALM)].mean())
             pys = np.append(ys, ys[list(PALM)].mean())
             pz = np.append(z, z[list(PALM)].mean())
@@ -414,20 +444,37 @@ class Tracker:
         every time a finger bends."""
         g = self._group("palm_" + side)
         if hand:
-            xs, ys, z, _gesture = hand
+            xs, ys, z, _gesture, opn = hand
             px, py, pz = xs[list(PALM)].mean(), ys[list(PALM)].mean(), z[list(PALM)].mean()
             tx, ty, tz = unproject([px], [py], [pz], w, h, K)
             xy = g["f2"](np.array([1.0 - px, py]), now)     # mirrored, like the feeds
             t3 = g["f3"](np.array([tx[0], ty[0], tz[0]]), now)
-            g["last"] = (xy, t3)
+            opn = float(g.setdefault("fo", OneEuro(min_cutoff=2.0))(np.array([opn]), now)[0])
+            g["open"] = self._open_state(g.get("open", False), opn)
+            g["last"] = (xy, t3, opn)
         present = self._present(g, hand is not None, now)
+        if not present:
+            g["open"] = False
+            if "fo" in g:
+                g["fo"].reset()
         b = "/hand/" + side + "/"
-        items = [(b + "present", 1.0 if present else 0.0)]
+        items = [(b + "present", 1.0 if present else 0.0),
+                 (b + "open", 1.0 if (present and g.get("open")) else 0.0)]
         if present and g["last"]:
-            xy, t3 = g["last"]
+            xy, t3, opn = g["last"]
             items += [(b + "x", xy[0]), (b + "y", xy[1]),
-                      (b + "tx", t3[0]), (b + "ty", t3[1]), (b + "tz", t3[2])]
+                      (b + "tx", t3[0]), (b + "ty", t3[1]), (b + "tz", t3[2]),
+                      (b + "openness", opn)]
         return items
+
+    @staticmethod
+    def _open_state(was_open, openness):
+        """Hysteresis: on above OPEN_ON, off below OPEN_OFF, else unchanged."""
+        if openness > OPEN_ON:
+            return True
+        if openness < OPEN_OFF:
+            return False
+        return was_open
 
     def close(self):
         self.go = False

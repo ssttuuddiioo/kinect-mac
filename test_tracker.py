@@ -80,12 +80,39 @@ got, sizes, _, _ = run(col, np.full((h, w), 800.0, np.float32), port=9103)
 both = got.get("/hand/left/present") == 1.0 and got.get("/hand/right/present") == 1.0
 check("both hands present", both, "L=%s R=%s" % (got.get("/hand/left/present"), got.get("/hand/right/present")))
 left = sorted(k for k in got if k.startswith("/hand/left/"))
-check("palm only: present + x y tx ty tz per hand", left == ["/hand/left/%s" % c for c in
-      ("present", "tx", "ty", "tz", "x", "y")], "%s" % [k.split("/")[-1] for k in left])
+check("palm: present open openness x y tx ty tz", left == ["/hand/left/%s" % c for c in
+      ("open", "openness", "present", "tx", "ty", "tz", "x", "y")],
+      "%s" % [k.split("/")[-1] for k in left])
+check("open hands read OPEN (on)", got.get("/hand/left/open") == 1.0 and got.get("/hand/right/open") == 1.0,
+      "L=%s R=%s  openness %.2f / %.2f" % (got.get("/hand/left/open"), got.get("/hand/right/open"),
+                                          got.get("/hand/left/openness", -1), got.get("/hand/right/openness", -1)))
 check("no finger joints or gestures sent", not any("tip" in k or "gesture" in k for k in got))
 check("palm depth-lifted to 0.8 m", abs(got.get("/hand/left/tz", 0) + 0.8) < 0.01,
       "tz=%.3f" % got.get("/hand/left/tz", 0))
 check("every datagram under the cap", max(sizes) <= 9216, "largest %d B" % max(sizes))
+
+print("\n[fist - closed hand at 0.8 m]")
+col = load_mirrored(os.path.join(IMG, "fist.jpg"))
+h, w = col.shape[:2]
+got, _, _, _ = run(col, np.full((h, w), 800.0, np.float32), port=9104)
+sides = [s for s in ("left", "right") if got.get("/hand/%s/present" % s) == 1.0]
+check("fist detected", len(sides) == 1, "%s" % sides)
+if sides:
+    s = sides[0]
+    check("fist reads CLOSED (off)", got.get("/hand/%s/open" % s) == 0.0,
+          "open=%s openness=%.2f" % (got.get("/hand/%s/open" % s), got.get("/hand/%s/openness" % s, -1)))
+
+print("\n[hysteresis - no chatter in the gap]")
+st = T.Tracker._open_state
+check("closed -> 0.80 turns ON", st(False, 0.80) is True)
+check("open -> 0.40 turns OFF", st(True, 0.40) is False)
+check("open stays open at 0.60 (in the gap)", st(True, 0.60) is True)
+check("closed stays closed at 0.60 (in the gap)", st(False, 0.60) is False)
+seq, state, flips = [0.1, 0.7, 0.5, 0.7, 0.5, 0.7, 0.9, 0.6, 0.5, 0.6, 0.3], False, 0
+for v in seq:
+    new = st(state, v); flips += new != state; state = new
+check("a hand wobbling around one level flips only twice", flips == 2,
+      "%d flips over %s" % (flips, seq))
 
 print("\n%s" % ("ALL PASSED" if failures == 0 else "%d FAILED" % failures))
 sys.exit(1 if failures else 0)

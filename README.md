@@ -122,7 +122,8 @@ Mega's Azure Kinect body tracking, Linux).
 
 What this does instead is run MediaPipe on the colour stream and lift its
 landmarks into 3D using our depth — see [TRACKING.md](TRACKING.md). It gets you
-33 body joints, 21 per hand and gestures, in metres. It is weaker than
+33 body joints and each hand's position and open/closed state, in metres. It is
+weaker than
 Microsoft's tracker at occlusion and unusual poses, because it reads the colour
 image rather than depth, and it has no per-pixel player index.
 

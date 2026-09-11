@@ -581,12 +581,14 @@ class App:
                 self.canvas.create_oval(x * cw - 3, y * ch - 3, x * cw + 3, y * ch + 3,
                                         fill=GREEN, outline="", tags="overlay")
         if self.t_hands:
-            for side, xs, ys in ov.get("hands", []):
+            for side, xs, ys, is_open in ov.get("hands", []):
                 col = AMBER if side == "left" else "#4aa8ff"
-                r = 2 if len(xs) > 1 else 7           # a single palm point gets a big dot
+                r = 2 if len(xs) > 1 else 8           # a single palm point gets a big dot
                 for x, y in zip(xs, ys):
+                    # filled = open (sending 1), ring = closed (sending 0)
                     self.canvas.create_oval(x * cw - r, y * ch - r, x * cw + r, y * ch + r,
-                                            fill=col, outline="", tags="overlay")
+                                            fill=col if is_open else "", outline=col,
+                                            width=3, tags="overlay")
 
     def quit(self):
         self.log.write("EXIT", "clean, %d frames" % self.total)
