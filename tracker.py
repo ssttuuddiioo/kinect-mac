@@ -28,9 +28,10 @@ OSC layout (one float per address, so TD's OSC In CHOP gets clean channels):
   /pose/<joint>/tx /ty /tz           metres, TD space (Y up, -Z forward)
   /pose/<joint>/v                    visibility 0-1
   /hand/<left|right>/present
-  /hand/<side>/<joint>/x /y /tx /ty /tz
-  /hand/<side>/palm/...              wrist + four knuckles averaged; steadier
-  /hand/<side>/gesture/<name>        1 for the recognised gesture, else 0
+  /hand/<side>/x /y                  palm, 0-1 across the image (mirrored)
+  /hand/<side>/tx /ty /tz            palm, metres, TD space
+  (palm = wrist + four knuckles averaged, steadier than any fingertip.
+   Set Tracker.hand_detail = True for all 21 joints and gesture flags.)
 """
 
 import math
@@ -201,6 +202,9 @@ class Tracker:
         self.osc = OscSender(host, port)
         self.want_pose, self.want_hands = pose, hands
         self.gate = True           # drop bodies/hands outside the depth slab
+        # Hands send presence + palm position only - "where is the hand".
+        # True restores all 21 joints and the gesture flags (+113 channels/hand).
+        self.hand_detail = False
         self.hold_s = 0.3          # ride over brief dropouts before "gone"
         self.lock = threading.Lock()
         self.wake = threading.Event()
@@ -337,7 +341,10 @@ class Tracker:
         for side in ("left", "right"):
             out += self._emit_hand(side, seen.get(side), w, h, K, now)
             if seen.get(side):
-                hands_overlay.append((side, 1.0 - seen[side][0], seen[side][1]))
+                xs, ys = seen[side][0], seen[side][1]
+                if not self.hand_detail:            # just the palm
+                    xs, ys = np.array([xs[list(PALM)].mean()]), np.array([ys[list(PALM)].mean()])
+                hands_overlay.append((side, 1.0 - xs, ys))
 
         # the preview is mirrored like every other output
         self.overlay = {"pose": (1.0 - body[0], body[1]) if body else None,
@@ -375,6 +382,8 @@ class Tracker:
         return items
 
     def _emit_hand(self, side, hand, w, h, K, now):
+        if not self.hand_detail:
+            return self._emit_palm(side, hand, w, h, K, now)
         g = self._group("hand_" + side)
         if hand:
             xs, ys, z, gesture = hand
@@ -397,6 +406,27 @@ class Tracker:
                           (b + "tx", t3[i]), (b + "ty", t3[n + i]), (b + "tz", t3[2 * n + i])]
             items += [(base + "gesture/" + gname, 1.0 if gname == gesture else 0.0)
                       for gname in GESTURES]
+        return items
+
+    def _emit_palm(self, side, hand, w, h, K, now):
+        """Presence and palm position only. The palm - wrist plus the four
+        knuckles averaged - is far steadier than any fingertip, which moves
+        every time a finger bends."""
+        g = self._group("palm_" + side)
+        if hand:
+            xs, ys, z, _gesture = hand
+            px, py, pz = xs[list(PALM)].mean(), ys[list(PALM)].mean(), z[list(PALM)].mean()
+            tx, ty, tz = unproject([px], [py], [pz], w, h, K)
+            xy = g["f2"](np.array([1.0 - px, py]), now)     # mirrored, like the feeds
+            t3 = g["f3"](np.array([tx[0], ty[0], tz[0]]), now)
+            g["last"] = (xy, t3)
+        present = self._present(g, hand is not None, now)
+        b = "/hand/" + side + "/"
+        items = [(b + "present", 1.0 if present else 0.0)]
+        if present and g["last"]:
+            xy, t3 = g["last"]
+            items += [(b + "x", xy[0]), (b + "y", xy[1]),
+                      (b + "tx", t3[0]), (b + "ty", t3[1]), (b + "tz", t3[2])]
         return items
 
     def close(self):

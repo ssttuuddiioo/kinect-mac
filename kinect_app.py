@@ -583,8 +583,9 @@ class App:
         if self.t_hands:
             for side, xs, ys in ov.get("hands", []):
                 col = AMBER if side == "left" else "#4aa8ff"
+                r = 2 if len(xs) > 1 else 7           # a single palm point gets a big dot
                 for x, y in zip(xs, ys):
-                    self.canvas.create_oval(x * cw - 2, y * ch - 2, x * cw + 2, y * ch + 2,
+                    self.canvas.create_oval(x * cw - r, y * ch - r, x * cw + r, y * ch + r,
                                             fill=col, outline="", tags="overlay")
 
     def quit(self):

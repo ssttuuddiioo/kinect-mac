@@ -24,10 +24,13 @@ One float per address, so every value is its own clean CHOP channel.
 | `/pose/<joint>/x`, `/y` | 0–1 across the image, mirrored like the video feeds |
 | `/pose/<joint>/tx`, `/ty`, `/tz` | metres, TD space: Y up, −Z forward |
 | `/pose/<joint>/v` | visibility, 0–1 |
-| `/hand/left/present`, `/hand/right/present` | per hand |
-| `/hand/<side>/<joint>/x /y /tx /ty /tz` | 21 joints per hand |
-| `/hand/<side>/palm/…` | wrist + four knuckles averaged — steadier than a fingertip |
-| `/hand/<side>/gesture/<name>` | 1 for the recognised gesture, 0 for the rest |
+| `/hand/left/present`, `/hand/right/present` | 1 while that hand is tracked |
+| `/hand/<side>/x`, `/y` | palm, 0–1 across the image, mirrored like the feeds |
+| `/hand/<side>/tx`, `/ty`, `/tz` | palm, metres, TD space |
+
+Hands send **where the hand is** and nothing more: six channels each. The palm
+point is the wrist and four knuckles averaged, which stays put while fingers
+bend — far steadier than any fingertip.
 
 Pose joints (33): `nose`, `left_eye_inner`, `left_eye`, `left_eye_outer`,
 `right_eye_inner`, `right_eye`, `right_eye_outer`, `left_ear`, `right_ear`,
@@ -37,17 +40,16 @@ Pose joints (33): `nose`, `left_eye_inner`, `left_eye`, `left_eye_outer`,
 `right_hip`, `left_knee`, `right_knee`, `left_ankle`, `right_ankle`,
 `left_heel`, `right_heel`, `left_foot_index`, `right_foot_index`.
 
-Hand joints (21): `wrist`, `thumb_cmc/mcp/ip/tip`, `index_mcp/pip/dip/tip`,
-`middle_…`, `ring_…`, `pinky_…` — plus `palm`.
-
-Gestures: `None`, `Closed_Fist`, `Open_Palm`, `Pointing_Up`, `Thumb_Down`,
-`Thumb_Up`, `Victory`, `ILoveYou`.
+All 21 finger joints and gesture flags (`Closed_Fist`, `Open_Palm`,
+`Pointing_Up`, `Thumb_Up`, …) are still computed, just not sent. Set
+`Tracker.hand_detail = True` in `tracker.py` to send them — 119 channels per
+hand instead of 6, under `/hand/<side>/<joint>/…` and `/hand/<side>/gesture/…`.
 
 Left and right always mean **the person's** left and right, never the image's.
 
 ## Recipes
 
-**Palm as a pointer.** `hand/right/palm/x` and `hand/right/palm/y` are 0–1 and
+**Hand as a pointer.** `hand/right/x` and `hand/right/y` are 0–1 and
 already One Euro–smoothed — map them straight onto whatever you drive.
 `present` holds for 300 ms after a hand is lost, so a one-frame dropout doesn't
 snap the pointer away.

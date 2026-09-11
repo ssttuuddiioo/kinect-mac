@@ -13,7 +13,7 @@ speaks Syphon or MJPEG.
 Both cameras run through the same filters and publish the same outputs.
 
 **Body and hand tracking** go out over OSC with real 3D positions in metres —
-33 body joints, 21 per hand, and gestures — lined up with the point cloud. See
+33 body joints plus each hand's position — lined up with the point cloud. See
 [TRACKING.md](TRACKING.md).
 
 TouchDesigner's built-in Kinect operators are Windows-only, and Microsoft's

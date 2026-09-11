@@ -79,10 +79,12 @@ h, w = col.shape[:2]
 got, sizes, _, _ = run(col, np.full((h, w), 800.0, np.float32), port=9103)
 both = got.get("/hand/left/present") == 1.0 and got.get("/hand/right/present") == 1.0
 check("both hands present", both, "L=%s R=%s" % (got.get("/hand/left/present"), got.get("/hand/right/present")))
-check("22 points x5 channels per hand (21 joints + palm)",
-      sum(k.startswith("/hand/left/") and not k.endswith("present") and "/gesture/" not in k for k in got) == 22 * 5)
-g = [k.split("/")[-1] for k in got if k.startswith("/hand/left/gesture/") and got[k] == 1.0]
-check("exactly one gesture flagged per hand", len(g) == 1, "left: %s" % g)
+left = sorted(k for k in got if k.startswith("/hand/left/"))
+check("palm only: present + x y tx ty tz per hand", left == ["/hand/left/%s" % c for c in
+      ("present", "tx", "ty", "tz", "x", "y")], "%s" % [k.split("/")[-1] for k in left])
+check("no finger joints or gestures sent", not any("tip" in k or "gesture" in k for k in got))
+check("palm depth-lifted to 0.8 m", abs(got.get("/hand/left/tz", 0) + 0.8) < 0.01,
+      "tz=%.3f" % got.get("/hand/left/tz", 0))
 check("every datagram under the cap", max(sizes) <= 9216, "largest %d B" % max(sizes))
 
 print("\n%s" % ("ALL PASSED" if failures == 0 else "%d FAILED" % failures))
