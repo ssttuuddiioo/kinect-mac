@@ -12,8 +12,12 @@ rather than throwing, and you can set those few by hand.
 """
 
 INTRINSICS = (365.357, 365.357, 261.003, 207.894)   # fx, fy, cx, cy
+# ^ per-sensor. The app prints yours at startup - replace these.
 SERVER = "Kinect Cloud"
-W, H = 512, 424
+# Output resolution differs per camera: Kinect v2 512x424, Femto Mega 640x576
+# (or 1024x1024 in wide-FOV). Read from the live Syphon feed when possible;
+# these are only the fallback if nothing is streaming yet.
+W, H = 640, 576
 
 SHADER = '''uniform vec4 uIntrinsics;   // fx, fy, cx, cy
 out vec4 fragColor;
@@ -68,6 +72,13 @@ syphon = parent_comp.create(syphonspoutinTOP, "kinect_syphon")
 setpar(syphon, ["Signalsource", "signalsource", "Sourcetype"], "Syphon")
 setpar(syphon, ["Syphonservername", "syphonservername", "Servername"], SERVER)
 setpar(syphon, ["Syphonappname", "syphonappname", "Appname"], "Python")
+try:
+    syphon.cook(force=True)
+    if syphon.width > 1 and syphon.height > 1:
+        W, H = syphon.width, syphon.height
+except Exception:
+    pass
+print("using resolution %dx%d" % (W, H))
 
 shader_dat = parent_comp.create(textDAT, "kinect_shader")
 shader_dat.text = SHADER

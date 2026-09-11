@@ -19,3 +19,9 @@ soak.out
 *.v1-only
 *.depth-only
 *.prefilter
+
+# Python 3.12 virtualenv (pyorbbecsdk2 has no 3.14 wheels)
+.venv/
+
+# Orbbec SDK log output
+Log/

@@ -9,11 +9,20 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BREW=/opt/homebrew/bin/brew
-PY=/opt/homebrew/bin/python3.14
+PY="$HERE/.venv/bin/python"
 TD_SYPHON="/Applications/TouchDesigner.app/Contents/Frameworks/Syphon.framework"
 
 echo "==> dependencies"
-$BREW install libusb jpeg-turbo glfw cmake pkg-config python-tk || true
+$BREW install libusb jpeg-turbo glfw cmake pkg-config python@3.12 python-tk@3.12 || true
+
+echo "==> python 3.12 venv"
+# 3.12, not newer: pyorbbecsdk2 ships wheels up to 3.13 and Open3D only to
+# 3.12. Both have native arm64 macOS builds.
+if [ ! -x "$HERE/.venv/bin/python" ]; then
+    /opt/homebrew/bin/python3.12 -m venv "$HERE/.venv"
+fi
+"$HERE/.venv/bin/pip" install -q --upgrade pip
+"$HERE/.venv/bin/pip" install -q pyorbbecsdk2 numpy
 
 echo "==> libfreenect2"
 if [ ! -d "$HERE/libfreenect2" ]; then
@@ -58,9 +67,16 @@ clang++ -ObjC++ -std=c++11 -O2 -fobjc-arc -dynamiclib -o "$HERE/libk2syphon.dyli
     -framework Foundation -framework OpenGL -framework CoreGraphics \
     -Wno-deprecated-declarations -Wl,-rpath,"$HERE/vendor"
 
+clang++ -std=c++11 -O2 -dynamiclib -o "$HERE/libkproc.dylib" "$HERE/kproc.cpp"
+
+echo "==> tests"
+"$PY" "$HERE/test_kproc.py"
+
 echo "==> app bundle"
 "$HERE/make_apps.sh"
 
 echo
-echo "Done.  Run:  $PY $HERE/kinect_app.py"
-echo "       or:  open ~/Applications/Kinect.app"
+echo "Done."
+echo "  Kinect v2 :  open ~/Applications/Kinect.app"
+echo "  Femto Mega:  double-click 'Run Femto Mega.command'  (needs sudo on macOS)"
+echo "  no camera :  $PY $HERE/kinect_app.py --camera synthetic"

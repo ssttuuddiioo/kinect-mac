@@ -1,8 +1,16 @@
 # kinect-mac
 
-Use a **Kinect v2** (the Xbox One one) on **Apple Silicon macOS**, and get its
-depth, colour and point cloud into TouchDesigner, OBS, or anything that speaks
-Syphon or MJPEG.
+Use a **Kinect v2** or an **Orbbec Femto Mega** on **Apple Silicon macOS**, and
+get depth, colour and a point cloud into TouchDesigner, OBS, or anything that
+speaks Syphon or MJPEG.
+
+| Camera | How | Notes |
+|---|---|---|
+| Kinect v2 | libfreenect2 | `open ~/Applications/Kinect.app` |
+| Orbbec Femto Mega | Orbbec SDK v2 | needs root on macOS — see [FEMTO.md](FEMTO.md) |
+| none | synthetic test pattern | `--camera synthetic`, for testing without hardware |
+
+Both cameras run through the same filters and publish the same outputs.
 
 TouchDesigner's built-in Kinect operators are Windows-only, and Microsoft's
 Kinect SDK was never ported to the Mac. This drives the sensor directly through

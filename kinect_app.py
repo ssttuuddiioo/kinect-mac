@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from depth_view import Sensor
+from camera import open_camera
 from stream import Jpeg, BOUNDARY
 from syphon_out import Syphon, DEPTH, COLOUR, CLOUD
 
@@ -56,7 +56,13 @@ class HealthLog:
         # A segfault in libfreenect2, Syphon or the shim kills Python without a
         # traceback. faulthandler catches SIGSEGV/SIGABRT/SIGBUS and dumps every
         # thread's stack, which is the only way to see where a C crash happened.
-        self.crash = open(os.path.join(LOGDIR, "crash.log"), "a", buffering=1)
+        # A Femto Mega session runs as root, leaving crash.log root-owned; a
+        # later normal launch would then die here. Fall back to a per-user file.
+        try:
+            self.crash = open(os.path.join(LOGDIR, "crash.log"), "a", buffering=1)
+        except PermissionError:
+            self.crash = open(os.path.join(LOGDIR, "crash-%d.log" % os.getuid()),
+                              "a", buffering=1)
         faulthandler.enable(file=self.crash, all_threads=True)
 
     def uptime(self):
@@ -78,8 +84,12 @@ class HealthLog:
 
 
 class App:
-    def __init__(self, root):
+    def __init__(self, root, camera_kind="auto", synthetic_size=(640, 576)):
         self.root = root
+        self.camera_kind = camera_kind
+        self.synthetic_size = synthetic_size
+        self.cw, self.ch = 512, 424          # replaced once a camera opens
+        self.latest_dims = (512, 424)
         self.go = True
         self.latest = {"depth": None, "colour": None}      # raw, for preview
         self.jpeg_frames = {"depth": None, "colour": None}  # encoded, for MJPEG
@@ -163,8 +173,6 @@ class App:
         self.syphon = Syphon()
         self.syphon.start("Kinect Depth", "Kinect Colour", "Kinect Cloud")
 
-        self.header = b"P5\n512 424\n255\n"
-        self.rgb_header = b"P6\n512 424\n255\n"
         self.sensor = None
         self.serial = ""
         self.intrinsics = None
@@ -181,6 +189,19 @@ class App:
         signal.signal(signal.SIGINT, lambda _s, _f: self.quit())
         self.tick()
 
+    def adopt_resolution(self, sensor):
+        """Size everything to this camera. The Femto Mega's depth is 640x576
+        (or 1024x1024 wide-FOV), not the Kinect's 512x424."""
+        self.cw, self.ch = sensor.w, sensor.h
+        # Preview only - outputs always go out at full resolution.
+        self.preview_step = 2 if max(self.cw, self.ch) > 720 else 1
+        self.canvas.configure(width=self.cw // self.preview_step,
+                              height=self.ch // self.preview_step)
+        self.root.title("Kinect - %s %dx%d" % (getattr(sensor, "kind", "camera"),
+                                               self.cw, self.ch))
+        self.log.write("CAMERA", "%s %s %dx%d" % (getattr(sensor, "kind", "?"),
+                                                  sensor.serial, self.cw, self.ch))
+
     def open_sensor(self):
         """Try to acquire the Kinect. Shows Retry instead of dying if absent."""
         if self.sensor is not None:
@@ -189,12 +210,14 @@ class App:
         self.status.configure(text="opening sensor...", fg=DIM)
         self.root.update_idletasks()
         try:
-            sensor = Sensor(colour=True)
+            sensor = open_camera(self.camera_kind, colour=True,
+                                 synthetic_size=self.synthetic_size)
             sensor.enable_cloud(True)
         except Exception as exc:
-            self.status.configure(
-                text="No Kinect found - plug in USB and 12V power, then Retry",
-                fg=RED)
+            hint = ("Femto Mega: run with sudo, and quit TD's Orbbec TOP"
+                    if self.camera_kind == "femto" else
+                    "plug in the camera (Kinect also needs its 12V power)")
+            self.status.configure(text="No camera - %s, then Retry" % hint, fg=RED)
             self.retry.pack(side="left", padx=(0, 10))
             self.status.pack_forget()
             self.status.pack(side="left")
@@ -203,12 +226,14 @@ class App:
             return
         self.sensor = sensor
         self.serial = sensor.serial
+        self.adopt_resolution(sensor)
         self.log.write("SENSOR_OPEN", "serial %s" % sensor.serial)
         self.stall_logged = False
         self.intrinsics = sensor.intrinsics()
         if self.intrinsics:
-            print("IR intrinsics  fx=%.3f fy=%.3f cx=%.3f cy=%.3f"
-                  % self.intrinsics, flush=True)
+            print("%s intrinsics  fx=%.3f fy=%.3f cx=%.3f cy=%.3f  (%dx%d)"
+                  % ((getattr(sensor, "kind", "?"),) + tuple(self.intrinsics)
+                     + (sensor.w, sensor.h)), flush=True)
         self.t0 = time.monotonic()
         self.total = 0
         self.last_frame = 0.0
@@ -279,20 +304,22 @@ class App:
                 if grey is None:
                     continue
                 cloud = sensor.cloud_frame()
+                w, h = sensor.w, sensor.h
 
-                self.syphon.publish(DEPTH, grey, 512, 424, 1)
+                self.syphon.publish(DEPTH, grey, w, h, 1)
                 if rgb is not None:
-                    self.syphon.publish(COLOUR, rgb, 512, 424, 3)
+                    self.syphon.publish(COLOUR, rgb, w, h, 3)
                 if cloud is not None:
-                    self.syphon.publish(CLOUD, cloud, 512, 424, 3)
+                    self.syphon.publish(CLOUD, cloud, w, h, 3)
 
                 self.latest["depth"] = grey
                 self.latest["colour"] = rgb
+                self.latest_dims = (w, h)
 
                 if self.server is not None and self.jpeg is not None:
-                    enc = {"depth": self.jpeg.encode(grey, 512, 424, True, 80)}
+                    enc = {"depth": self.jpeg.encode(grey, w, h, True, 80)}
                     if rgb is not None:
-                        enc["colour"] = self.jpeg.encode(rgb, 512, 424, False, 80)
+                        enc["colour"] = self.jpeg.encode(rgb, w, h, False, 80)
                     with self.cond:
                         self.jpeg_frames.update(enc)
                         self.seq += 1
@@ -331,8 +358,12 @@ class App:
         mode = self.mode.get()
         data = self.latest.get(mode)
         if data:
-            head = self.rgb_header if mode == "colour" else self.header
-            self.image = tk.PhotoImage(data=head + data)
+            w, h = self.latest_dims
+            head = (b"P6\n%d %d\n255\n" if mode == "colour"
+                    else b"P5\n%d %d\n255\n") % (w, h)
+            img = tk.PhotoImage(data=head + data)
+            step = getattr(self, "preview_step", 1)
+            self.image = img.subsample(step) if step > 1 else img
             self.canvas.itemconfigure(self.item, image=self.image)
 
         if self.sensor is None:          # waiting on Retry; message already set
@@ -390,6 +421,21 @@ class App:
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Depth camera -> Syphon / MJPEG")
+    ap.add_argument("--camera", default="auto",
+                    choices=("auto", "kinect", "femto", "synthetic"),
+                    help="auto tries the Femto Mega, then the Kinect v2")
+    ap.add_argument("--size", default="640x576",
+                    help="synthetic camera resolution, WxH")
+    ap.add_argument("--mjpeg", action="store_true",
+                    help="start the MJPEG server at launch (headless use)")
+    args = ap.parse_args()
+    size = tuple(int(v) for v in args.size.lower().split("x"))
+
     root = tk.Tk()
-    App(root)
+    app = App(root, camera_kind=args.camera, synthetic_size=size)
+    if args.mjpeg:
+        app.mjpeg_on.set(True)
+        app.toggle_mjpeg()
     root.mainloop()

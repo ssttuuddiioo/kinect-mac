@@ -9,7 +9,7 @@
 
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PY=/opt/homebrew/bin/python3.14
+PY="$HERE/.venv/bin/python"
 DEST="$HOME/Applications"
 mkdir -p "$DEST"
 
