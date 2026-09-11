@@ -42,15 +42,53 @@ GREEN, RED, AMBER = "#3fbf6f", "#e2564d", "#e0a33e"
 MJPEG_PORT = 8010
 
 
+def _safe_log(path, exclusive=False):
+    """Open a log for appending without following symlinks.
+
+    The Femto Mega runs this app as root. A plain open() follows a symlink, so
+    anything running as the user could swap logs/crash.log for a link to a
+    system file and have root append to it. O_NOFOLLOW refuses a symlink as the
+    final component; O_EXCL refuses any pre-existing name, link or not.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+    if exclusive:
+        flags |= os.O_EXCL
+    return os.fdopen(os.open(path, flags, 0o644), "a", buffering=1)
+
+
+def _safe_logdir(path):
+    """Refuse a symlinked log directory: O_NOFOLLOW only guards the last path
+    component, and root creating files inside a linked-to directory is the
+    same attack one level up. Falls back to a private temp directory."""
+    import stat
+    import tempfile
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return tempfile.mkdtemp(prefix="kinect-logs-")
+    except FileNotFoundError:
+        os.makedirs(path, exist_ok=True)
+    return path
+
+
 class HealthLog:
     """Overnight diagnostics. Line-buffered and flushed, so a hard crash still
     leaves everything up to the last event on disk."""
 
     def __init__(self):
-        os.makedirs(LOGDIR, exist_ok=True)
+        logdir = _safe_logdir(LOGDIR)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.path = os.path.join(LOGDIR, "health-%s.log" % stamp)
-        self.file = open(self.path, "a", buffering=1)
+        self.path = os.path.join(logdir, "health-%s-%d.log" % (stamp, os.getpid()))
+        try:
+            self.file = _safe_log(self.path, exclusive=True)
+        except FileExistsError:
+            # Something already holds this name - possibly planted. Refusing is
+            # right, but refusing to start would turn a write attack into a
+            # denial of service, so take an unguessable name instead.
+            import secrets
+            self.path = os.path.join(logdir, "health-%s-%d-%s.log"
+                                     % (stamp, os.getpid(), secrets.token_hex(4)))
+            self.file = _safe_log(self.path, exclusive=True)
         self.started = time.monotonic()
 
         # A segfault in libfreenect2, Syphon or the shim kills Python without a
@@ -59,10 +97,10 @@ class HealthLog:
         # A Femto Mega session runs as root, leaving crash.log root-owned; a
         # later normal launch would then die here. Fall back to a per-user file.
         try:
-            self.crash = open(os.path.join(LOGDIR, "crash.log"), "a", buffering=1)
-        except PermissionError:
-            self.crash = open(os.path.join(LOGDIR, "crash-%d.log" % os.getuid()),
-                              "a", buffering=1)
+            self.crash = _safe_log(os.path.join(logdir, "crash.log"))
+        except OSError:
+            # root-owned from an earlier Femto session, or a planted symlink
+            self.crash = _safe_log(os.path.join(logdir, "crash-%d.log" % os.getuid()))
         faulthandler.enable(file=self.crash, all_threads=True)
 
     def uptime(self):
@@ -308,6 +346,13 @@ class App:
         """Try to acquire the Kinect. Shows Retry instead of dying if absent."""
         if self.sensor is not None:
             return
+        old = getattr(self, "worker_thread", None)
+        if old is not None and old.is_alive():
+            # The previous worker still holds the device until its blocked
+            # frame() returns. Opening now would find the camera busy.
+            self.status.configure(text="waiting for the camera to be released...", fg=DIM)
+            self.root.after(250, self.open_sensor)
+            return
         self.retry.pack_forget()
         self.status.configure(text="opening sensor...", fg=DIM)
         self.root.update_idletasks()
@@ -348,7 +393,8 @@ class App:
         self.t0 = time.monotonic()
         self.total = 0
         self.last_frame = 0.0
-        threading.Thread(target=self.worker, daemon=True).start()
+        self.worker_thread = threading.Thread(target=self.worker, daemon=True)
+        self.worker_thread.start()
 
     # --- outputs ----------------------------------------------------------
 
@@ -377,12 +423,18 @@ class App:
                     self.end_headers()
                     last = 0
                     try:
-                        while app.go:
+                        # Stop as soon as MJPEG is switched off (app.server is
+                        # replaced/cleared), not up to 10 s later on a timeout.
+                        while app.go and app.server is self.server:
                             with app.cond:
                                 while app.go and (app.seq == last
                                                   or app.jpeg_frames[name] is None):
+                                    if app.server is not self.server:
+                                        return          # switched off while waiting
                                     if not app.cond.wait(timeout=10.0):
                                         return
+                                if app.server is not self.server or not app.go:
+                                    return
                                 last = app.seq
                                 frame = app.jpeg_frames[name]
                             self.wfile.write(b"--%s\r\n" % BOUNDARY.encode())
@@ -393,13 +445,26 @@ class App:
                     except (BrokenPipeError, ConnectionResetError):
                         pass
 
-            self.server = ThreadingHTTPServer(("127.0.0.1", MJPEG_PORT), Handler)
+            try:
+                self.server = ThreadingHTTPServer(("127.0.0.1", MJPEG_PORT), Handler)
+            except OSError as exc:
+                # Port taken (another instance, or stream.py). Say so and
+                # untick, rather than leaving the box on with nothing serving.
+                self.mjpeg_on.set(False)
+                self.status.configure(text="MJPEG: port %d unavailable (%s)"
+                                           % (MJPEG_PORT, exc.strerror), fg=RED)
+                self.log.write("MJPEG", "bind failed: %s" % exc)
+                return
             threading.Thread(target=self.server.serve_forever, daemon=True).start()
             print("MJPEG on http://127.0.0.1:%d/depth.mjpg" % MJPEG_PORT, flush=True)
             self.log.write("MJPEG", "started on :%d" % MJPEG_PORT)
         elif not self.mjpeg_on.get() and self.server is not None:
-            self.server.shutdown()
-            self.server = None
+            server, self.server = self.server, None
+            server.shutdown()        # stops serve_forever...
+            server.server_close()    # ...but only this releases the port. Without
+                                     # it, turning MJPEG back on failed: in use.
+            with self.cond:          # wake handlers so they notice and leave
+                self.cond.notify_all()
             print("MJPEG stopped", flush=True)
             self.log.write("MJPEG", "stopped")
 
@@ -458,13 +523,47 @@ class App:
             self.log.write("WORKER_DIED", "%s: %s" % (type(exc).__name__, exc))
             raise
         finally:
+            # The worker closes its own camera, and only here - after its last
+            # frame() has returned. Closing from any other thread would free
+            # the device while this thread is blocked inside it (a hung USB
+            # device holds frame() for seconds): a use-after-free.
+            try:
+                sensor.close()
+            except Exception as exc:
+                self.log.write("CLOSE_ERROR", str(exc)[:200])
             self.log.write("WORKER_END", "after %d frames" % self.total)
 
     # --- ui ---------------------------------------------------------------
 
     def tick(self):
+        """Runs the UI loop. Reschedules in `finally`, so no single exception
+        can freeze it - which would also stop the Syphon pump, and with it
+        TouchDesigner's view of the servers."""
         if not self.go:
             return
+        delay = 33
+        try:
+            delay = self._tick() or 33
+        except Exception as exc:
+            self._tick_failed(exc)
+        finally:
+            if self.go:
+                self._tick_id = self.root.after(delay, self.tick)
+
+    def _tick_failed(self, exc):
+        """Log each distinct failure once - a fault that repeats every frame
+        would otherwise write 30 lines a second."""
+        key = "%s: %s" % (type(exc).__name__, exc)
+        seen = getattr(self, "_tick_errors", set())
+        if key not in seen:
+            seen.add(key)
+            self._tick_errors = seen
+            self.log.write("TICK_ERROR", key[:200])
+            import traceback
+            traceback.print_exc()
+
+    def _tick(self):
+        """One UI frame. Returns the delay before the next, in ms."""
         # Mirror Tk vars into plain attributes; the worker must never touch Tk.
         self.f_near = self.vars["near"].get()
         self.f_far = max(self.vars["far"].get(), self.f_near + 50)
@@ -490,8 +589,7 @@ class App:
             self.canvas.itemconfigure(self.item, image=self.image)
 
         if self.sensor is None:          # waiting on Retry; message already set
-            self.root.after(200, self.tick)
-            return
+            return 200
 
         stalled = self.last_frame > 0 and time.monotonic() - self.last_frame > 5.0
         never = self.total == 0 and time.monotonic() - self.t0 > 15.0
@@ -510,7 +608,8 @@ class App:
                                % (int(time.monotonic() - self.last_frame), self.total))
                 self.log.dump_threads("stalled")
             if not self.retry.winfo_ismapped():
-                self.sensor.close()
+                # Only signal. The worker closes the camera itself once its
+                # current frame() returns; closing it here was a use-after-free.
                 self.sensor = None
                 self.retry.pack(side="left", padx=(0, 10))
                 self.status.pack_forget()
@@ -520,7 +619,7 @@ class App:
                 text="%s   %.1f fps   Syphon: depth=%d colour=%d cloud=%d%s%s"
                 % (self.serial, self.fps, clients[0], clients[1], clients[2],
                    "   MJPEG :%d" % MJPEG_PORT if self.server else "",
-                   ("   track %.0f fps %.0fms" % (self.tracker.fps, self.tracker.ms)
+                   ("   track %.0f fps %.0fms" % (self.tracker.current_fps(), self.tracker.ms)
                     if self.tracker and (self.t_pose or self.t_hands) else "")),
                 fg=GREEN if any(clients) else DIM)
         now = time.monotonic()
@@ -532,7 +631,7 @@ class App:
             self.log.write("OK", "%.1f fps  frames=%d  clients=%s  peakRSS=%.0fMB  threads=%d"
                            % (self.fps, self.total, clients, rss_mb,
                               threading.active_count()))
-        self.root.after(33, self.tick)
+        return 33
 
     # --- tracking -------------------------------------------------------------
 
@@ -541,26 +640,39 @@ class App:
         Main thread only - the worker never touches Tk."""
         self.t_pose, self.t_hands = self.track_pose.get(), self.track_hands.get()
         self.t_gate = self.track_gate.get()
+        if self.tracker is not None and self.tracker.hung():
+            # Frames going in, none coming out. Abandon it and start fresh;
+            # its thread is a daemon, so it can't hold anything up.
+            self.log.write("TRACKER_HUNG", "no frame completed in 6 s - replacing it")
+            # Keep sending where the old one was. Re-reading the entry box gave
+            # the default 9000 when it held half-typed text, silently moving
+            # all tracking off the port TouchDesigner listens on.
+            self._tracker_port = self.tracker.osc.addr[1]
+            self.tracker.go = False
+            self.tracker = None
         if (self.t_pose or self.t_hands) and self.tracker is None:
-            try:
-                port = int(self.osc_port.get())
-            except ValueError:
-                port = 9000
-            from tracker import Tracker
-            self.tracker = Tracker(port=port)
+            from tracker import TrackerProcess, valid_port
+            port = valid_port(self.osc_port.get(), getattr(self, "_tracker_port", 9000))
+            # A child process: MediaPipe wedges itself after a couple of minutes
+            # of normal use and can't be recreated in-process. See tracker.py.
+            self.tracker = TrackerProcess(port=port)
             self.log.write("TRACKING", "started, OSC -> 127.0.0.1:%d" % port)
             print("tracking: OSC -> 127.0.0.1:%d" % port, flush=True)
         tr = self.tracker
         if tr is None:
             return
+        if getattr(tr, "restarts", 0) != getattr(self, "_restarts_logged", 0):
+            self._restarts_logged = tr.restarts
+            self.log.write("TRACKER_RESTART", "#%d %s" % (tr.restarts, tr.restart_reason))
+        if tr.rebuilds != getattr(self, "_rebuilds_logged", 0):
+            self._rebuilds_logged = tr.rebuilds
+            self.log.write("TRACKER_REBUILD", "#%d %s" % (tr.rebuilds, tr.rebuild_reason))
         tr.want_pose, tr.want_hands, tr.gate = self.t_pose, self.t_hands, self.t_gate
-        try:
-            port = int(self.osc_port.get())
-            if port != tr.osc.addr[1]:
-                tr.osc.retarget("127.0.0.1", port)
-                self.log.write("TRACKING", "OSC -> 127.0.0.1:%d" % port)
-        except ValueError:
-            pass
+        from tracker import valid_port
+        port = valid_port(self.osc_port.get(), None)   # None: ignore half-typed input
+        if port is not None and port != tr.osc.addr[1]:
+            tr.osc.retarget("127.0.0.1", port)
+            self.log.write("TRACKING", "OSC -> 127.0.0.1:%d" % port)
 
     def draw_overlay(self):
         """Tracked landmarks over the preview, so you can see what TD gets."""
@@ -598,11 +710,34 @@ class App:
         with self.cond:
             self.cond.notify_all()
         if self.server:
-            self.server.shutdown()
-        if self.sensor:
-            sensor, self.sensor = self.sensor, None
-            self.root.after(300, sensor.close)
-        self.root.after(500, lambda: (self.syphon.stop(), self.root.destroy()))
+            server, self.server = self.server, None
+            server.shutdown()
+            server.server_close()
+        # Signal the worker; it closes the camera itself once frame() returns.
+        self.sensor = None
+        self._finish_quit(time.monotonic())
+
+    def _finish_quit(self, started):
+        """Tear down only once the worker has let go of the camera. Bounded:
+        a device that never returns gets abandoned after 10 s rather than
+        hanging the app on exit."""
+        w = getattr(self, "worker_thread", None)
+        if w is not None and w.is_alive() and time.monotonic() - started < 10.0:
+            self.root.after(100, lambda: self._finish_quit(started))
+            return
+        if w is not None and w.is_alive():
+            self.log.write("QUIT", "camera did not release within 10 s")
+        # A tick already queued would otherwise fire into a destroyed window
+        # ("invalid command name ...tick").
+        if getattr(self, "_tick_id", None):
+            try:
+                self.root.after_cancel(self._tick_id)
+            except tk.TclError:
+                pass
+        try:
+            self.syphon.stop()
+        finally:
+            self.root.destroy()
 
 
 if __name__ == "__main__":
@@ -617,6 +752,9 @@ if __name__ == "__main__":
     ap.add_argument("--image", default=None,
                     help="with --camera synthetic: replay this photo as the colour "
                          "stream, e.g. to build a TD tracking patch without a camera")
+    ap.add_argument("--track", default="none", choices=("none", "pose", "hands", "both"),
+                    help="start with tracking on (unattended runs)")
+    ap.add_argument("--osc-port", type=int, default=9000)
     ap.add_argument("--mjpeg", action="store_true",
                     help="start the MJPEG server at launch (headless use)")
     args = ap.parse_args()
@@ -628,4 +766,14 @@ if __name__ == "__main__":
     if args.mjpeg:
         app.mjpeg_on.set(True)
         app.toggle_mjpeg()
+    app.osc_port.set(str(args.osc_port))
+    app.track_pose.set(args.track in ("pose", "both"))
+    app.track_hands.set(args.track in ("hands", "both"))
     root.mainloop()
+    # Everything has been shut down in order by now: camera released by its
+    # worker, Syphon stopped, logs flushed line by line. Leave explicitly.
+    # MediaPipe runs non-daemon dispatcher threads, and one stuck in a broken
+    # graph kept the process alive after the window closed - holding the
+    # launcher's PID file, so the next launch said the camera was in use.
+    sys.stdout.flush(); sys.stderr.flush()
+    os._exit(0)

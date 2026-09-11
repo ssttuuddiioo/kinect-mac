@@ -102,6 +102,22 @@ On by default. A body whose torso — or a hand whose palm — falls outside the
 app's Near/Far slab is dropped before it's sent. Someone walking past behind
 you never reaches TD. Turn it off to track at any distance.
 
+## Reliability: MediaPipe runs in its own process
+
+MediaPipe 1.0.1's macOS GPU path fails after a few minutes of use — its pixel
+buffer allocator gives out (`kCVReturnAllocationFailed`) and it aborts, or its
+graph wedges. That's inside MediaPipe; it reproduces with nothing of ours in the
+process. And once it happens, MediaPipe can't be recreated in that process.
+
+So tracking runs in a **child process**, and a watchdog replaces the child when
+it dies, stops completing frames, goes silent, or fails to load. Expect a brief
+gap each time — about 2–3 s after a crash, about 8–9 s after a wedge — and then
+tracking resumes on its own. Each restart is logged as `TRACKER_RESTART` in the
+health log, with the reason. Frames reach the child through shared memory, and
+the camera thread never waits on it.
+
+See [REVIEW.md](REVIEW.md) for how this was found and tested.
+
 ## Why it's built this way
 
 Measured on this Mac while building it:

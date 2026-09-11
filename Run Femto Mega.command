@@ -13,5 +13,7 @@ echo
 sudo "$PWD/.venv/bin/python" "$PWD/kinect_app.py" --camera femto "$@"
 code=$?
 # Files written as root would lock out the next normal launch.
-sudo chown -R "$(id -un)" "$PWD/logs" 2>/dev/null
+# -P is chown -R's default on macOS, stated explicitly: never follow symlinks,
+# so a symlinked logs/ can't redirect this root chown onto a system directory.
+sudo chown -R -P "$(id -un)" "$PWD/logs" 2>/dev/null
 exit $code

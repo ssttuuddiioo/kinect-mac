@@ -185,7 +185,8 @@ open it hangs in `k2_open`.
 |---|---|
 | `kinect_app.py` | the app — preview, filters, all outputs, tracking |
 | `camera.py` | camera backends: Kinect v2, Femto Mega, synthetic |
-| `tracker.py` | MediaPipe body + hand tracking, depth-lifted, sent as OSC |
+| `tracker.py` | MediaPipe body + hand tracking, depth-lifted, sent as OSC; runs in a child process |
+| `REVIEW.md` | review and stress test: every bug found, how it was proven, what's left |
 | `kproc.cpp`, `kfilters.h` | camera-agnostic depth pipeline and shared filters |
 | `k2shim.cpp` | C shim over libfreenect2: gating, filtering, depth packing |
 | `k2syphon.mm` | Syphon publisher (Objective-C++) |
@@ -196,6 +197,7 @@ open it hangs in `k2_open`.
 | `td_setup.py` | builds the TD network from the Textport |
 | `kinect_xyz.glsl` | depth → XYZ unprojection shader |
 | `soak.sh` | overnight soak test |
+| `test_*.py`, `stress_test.py`, `load_test.py` | 112 checks: filters, bugs found in review, tracking, fault injection, sustained load |
 | `build.sh` | builds dependencies and shims |
 | `make_apps.sh` | builds the .app bundle |
 
