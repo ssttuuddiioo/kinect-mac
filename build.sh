@@ -22,7 +22,20 @@ if [ ! -x "$HERE/.venv/bin/python" ]; then
     /opt/homebrew/bin/python3.12 -m venv "$HERE/.venv"
 fi
 "$HERE/.venv/bin/pip" install -q --upgrade pip
-"$HERE/.venv/bin/pip" install -q pyorbbecsdk2 numpy
+"$HERE/.venv/bin/pip" install -q pyorbbecsdk2 numpy mediapipe python-osc
+
+echo "==> MediaPipe models"
+# Google's official model bucket. Tracking is GPU-only on macOS (see TRACKING.md).
+mkdir -p "$HERE/models/test"
+MP=https://storage.googleapis.com/mediapipe-models
+[ -f "$HERE/models/pose_landmarker_full.task" ] || curl -sSfL -o "$HERE/models/pose_landmarker_full.task" \
+    "$MP/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+[ -f "$HERE/models/gesture_recognizer.task" ] || curl -sSfL -o "$HERE/models/gesture_recognizer.task" \
+    "$MP/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task"
+for img in pose.jpg woman_hands.jpg; do
+    [ -f "$HERE/models/test/$img" ] || curl -sSfL -o "$HERE/models/test/$img" \
+        "https://storage.googleapis.com/mediapipe-assets/$img"
+done
 
 echo "==> libfreenect2"
 if [ ! -d "$HERE/libfreenect2" ]; then

@@ -44,6 +44,7 @@ struct K2 {
     // B=255 where valid. 8-bit shading is far too coarse to unproject from.
     unsigned char *cloud = NULL;
     int want_cloud = 0;
+    bool bgr = true;             // colour byte order of the last frame
 };
 }
 
@@ -119,6 +120,7 @@ int k2_frame(void *h, unsigned char *grey, unsigned char *rgb,
         want_rgb ? k->undistorted->data : depth->data);
     const unsigned char *cz = want_rgb ? k->registered->data : nullptr;
     const bool bgr = want_rgb && colour->format == lf::Frame::BGRX;
+    if (want_rgb) k->bgr = bgr;
 
     const size_t n = (size_t)w * hgt;
     if (!k->scratch) {
@@ -214,6 +216,32 @@ void k2_set_filters(void *h, int temporal, int median, int erode) {
     k->f_temporal = temporal < 0 ? 0 : (temporal > 90 ? 90 : temporal);
     k->f_median = median < 0 ? 0 : (median > 3 ? 3 : median);
     k->f_erode = erode < 0 ? 0 : (erode > 5 ? 5 : erode);
+}
+
+// Unmasked registered colour and smoothed depth from the last frame, in the
+// camera's natural UNMIRRORED orientation. For tracking: MediaPipe needs a
+// natural image rather than our cutout, Pose needs it unmirrored to label
+// left/right anatomically, and depth lifts joints into 3D.
+// depth_out: w*h floats (mm); rgb_out: w*h*3 RGB or NULL. Returns 1 depth,
+// 2 colour.
+int k2_get_raw(void *h, float *depth_out, unsigned char *rgb_out) {
+    K2 *k = static_cast<K2 *>(h);
+    if (!k || !k->smoothed || !depth_out) return 0;
+    const int w = k2_width(), hgt = k2_height();
+    const bool colour = rgb_out && k->colour && k->registered;
+    const unsigned char *cz = colour ? k->registered->data : NULL;
+    for (int y = 0; y < hgt; ++y)
+        for (int x = 0; x < w; ++x) {
+            const int si = y * w + x, di = si;
+            depth_out[di] = k->smoothed[si];
+            if (colour) {
+                const unsigned char *p = cz + si * 4;
+                unsigned char *d = rgb_out + di * 3;
+                if (k->bgr) { d[0] = p[2]; d[1] = p[1]; d[2] = p[0]; }
+                else        { d[0] = p[0]; d[1] = p[1]; d[2] = p[2]; }
+            }
+        }
+    return colour ? 3 : 1;
 }
 
 // Enable the packed-depth cloud buffer (costs one extra pass per frame).

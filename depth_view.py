@@ -81,6 +81,8 @@ class Sensor:
         self.lib.k2_get_cloud.restype = ctypes.c_int
         self.lib.k2_intrinsics.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(ctypes.c_float)] * 4
         self.lib.k2_intrinsics.restype = ctypes.c_int
+        self.lib.k2_get_raw.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        self.lib.k2_get_raw.restype = ctypes.c_int
         self.lib.k2_width.restype = ctypes.c_int
         self.lib.k2_height.restype = ctypes.c_int
 
@@ -114,6 +116,18 @@ class Sensor:
         if self.cloud is None:
             return None
         return bytes(self.cloud) if self.lib.k2_get_cloud(self.handle, self.cloud) else None
+
+    def raw_frame(self):
+        """Unmasked colour (h,w,3 RGB) and depth (h,w mm) from the last frame,
+        mirrored like the outputs. For tracking."""
+        import numpy as np
+        depth = np.zeros((self.h, self.w), np.float32)
+        rgb = np.zeros((self.h, self.w, 3), np.uint8) if self.colour else None
+        rc = self.lib.k2_get_raw(self.handle, depth.ctypes.data,
+                                 None if rgb is None else rgb.ctypes.data)
+        if not rc:
+            return None, None
+        return (rgb if rc & 2 else None), depth
 
     def intrinsics(self):
         """IR camera fx, fy, cx, cy - needed to unproject depth to XYZ."""

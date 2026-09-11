@@ -73,6 +73,22 @@ class _KProc:
             self.handle = None
 
 
+def _unmirrored_raw(raw, device_mirrored=False):
+    """The camera's true, unmirrored view of the last frame, for tracking.
+
+    Normally the frame as captured, with no copy at all. Only a device that
+    mirrors in hardware needs flipping back first.
+    """
+    colour, depth = raw
+    if depth is None:
+        return None, None
+    if device_mirrored:
+        depth = depth[:, ::-1]
+        colour = None if colour is None else colour[:, ::-1]
+    return (None if colour is None else np.ascontiguousarray(colour),
+            np.ascontiguousarray(depth, dtype=np.float32))
+
+
 # --- Orbbec Femto Mega -------------------------------------------------------
 
 class FemtoCamera:
@@ -185,7 +201,12 @@ class FemtoCamera:
         grey, rgb = self.proc.run(depth, colour, near, far, self.mirror, self.want_cloud)
         if self.want_cloud:
             self.cloud = self.proc.cloud.tobytes()
+        self._raw = (colour, depth)
         return grey, rgb
+
+    def raw_frame(self):
+        return _unmirrored_raw(getattr(self, "_raw", (None, None)),
+                               device_mirrored=not self.mirror)
 
     def cloud_frame(self):
         return self.cloud
@@ -224,7 +245,15 @@ class SyntheticCamera:
 
     kind = "synthetic"
 
-    def __init__(self, colour=True, w=640, h=576, fps=30.0):
+    def __init__(self, colour=True, w=640, h=576, fps=30.0, image=None):
+        # image: replay a still photo as the colour stream, at a flat 1.5 m.
+        # Lets tracking and TD patches be developed with no camera attached.
+        self.image = None
+        if image:
+            import mediapipe as mp
+            self.image = np.ascontiguousarray(
+                np.asarray(mp.Image.create_from_file(image).numpy_view())[..., :3])
+            h, w = self.image.shape[:2]
         self.w, self.h = w, h
         self.serial = "SYNTHETIC-%dx%d" % (w, h)
         self.colour = colour
@@ -245,6 +274,14 @@ class SyntheticCamera:
         if now < self.next:
             time.sleep(self.next - now)
         self.next += self.period
+        if self.image is not None:
+            depth = np.full((self.h, self.w), 1500.0, np.float32)
+            colour = self.image if (want_colour and self.colour) else None
+            grey, rgb = self.proc.run(depth, colour, near, far, True, self.want_cloud)
+            if self.want_cloud:
+                self.cloud = self.proc.cloud.tobytes()
+            self._raw = (self.image, depth)
+            return grey, rgb
         t = time.monotonic() - self.t0
         cx = self.w * (0.5 + 0.3 * np.sin(t * 0.8))
         cy = self.h * (0.5 + 0.2 * np.cos(t * 0.6))
@@ -257,7 +294,11 @@ class SyntheticCamera:
         grey, rgb = self.proc.run(depth, colour, near, far, True, self.want_cloud)
         if self.want_cloud:
             self.cloud = self.proc.cloud.tobytes()
+        self._raw = (self.gradient if self.colour else None, depth)
         return grey, rgb
+
+    def raw_frame(self):
+        return _unmirrored_raw(getattr(self, "_raw", (None, None)))
 
     def cloud_frame(self):
         return self.cloud
@@ -316,10 +357,11 @@ def detect():
 
 # --- factory -----------------------------------------------------------------
 
-def open_camera(kind="auto", colour=True, synthetic_size=(640, 576)):
+def open_camera(kind="auto", colour=True, synthetic_size=(640, 576),
+                synthetic_image=None):
     """kind: kinect | femto | synthetic | auto (Femto if present, else Kinect)."""
     if kind == "synthetic":
-        return SyntheticCamera(colour, *synthetic_size)
+        return SyntheticCamera(colour, *synthetic_size, image=synthetic_image)
     if kind == "femto":
         return FemtoCamera(colour)
     if kind == "kinect":

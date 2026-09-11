@@ -12,6 +12,10 @@ speaks Syphon or MJPEG.
 
 Both cameras run through the same filters and publish the same outputs.
 
+**Body and hand tracking** go out over OSC with real 3D positions in metres —
+33 body joints, 21 per hand, and gestures — lined up with the point cloud. See
+[TRACKING.md](TRACKING.md).
+
 TouchDesigner's built-in Kinect operators are Windows-only, and Microsoft's
 Kinect SDK was never ported to the Mac. This drives the sensor directly through
 libfreenect2 and publishes the results itself.
@@ -111,22 +115,21 @@ Virtual Camera** and every app that takes a webcam will see it.
 
 ## What this cannot do
 
-**No skeleton tracking, body/player index, gestures or face tracking.** Those
-came from Microsoft's SDK, which inferred them from depth using a trained
-classifier, and none of it exists outside Windows. libfreenect2 gives raw
-depth, IR and colour only.
+**No depth-based skeleton tracking, body/player index or face tracking of the
+Microsoft kind.** Those came from Microsoft's SDK, which inferred bodies from
+depth with a trained classifier; it exists only on Windows (and, for the Femto
+Mega's Azure Kinect body tracking, Linux).
 
-If you need skeletons, the workable route is a pose model (MediaPipe) on the
-colour stream, lifting its 2D landmarks into metric 3D by sampling the depth
-map. Feed it the **unmasked** colour and use depth to *validate* detections —
-don't pre-mask the image, since a hard-edged cutout is out-of-distribution for
-models trained on natural photographs.
+What this does instead is run MediaPipe on the colour stream and lift its
+landmarks into 3D using our depth — see [TRACKING.md](TRACKING.md). It gets you
+33 body joints, 21 per hand and gestures, in metres. It is weaker than
+Microsoft's tracker at occlusion and unusual poses, because it reads the colour
+image rather than depth, and it has no per-pixel player index.
 
 Also worth knowing: [FreenectTD](https://github.com/stosumarte/FreenectTD) is a
-native TouchDesigner plugin covering the same streams. If TD is your only
-destination it is less machinery than this. This project's advantages are
-filtering before the data leaves, and sharing one sensor across several apps at
-once.
+native TouchDesigner plugin covering the Kinect v2's raw streams. If TD is your
+only destination and you need neither the filtering nor tracking, it is less
+machinery than this.
 
 ## Overnight testing
 
@@ -179,7 +182,10 @@ open it hangs in `k2_open`.
 
 | File | |
 |---|---|
-| `kinect_app.py` | the app — preview, filters, all outputs |
+| `kinect_app.py` | the app — preview, filters, all outputs, tracking |
+| `camera.py` | camera backends: Kinect v2, Femto Mega, synthetic |
+| `tracker.py` | MediaPipe body + hand tracking, depth-lifted, sent as OSC |
+| `kproc.cpp`, `kfilters.h` | camera-agnostic depth pipeline and shared filters |
 | `k2shim.cpp` | C shim over libfreenect2: gating, filtering, depth packing |
 | `k2syphon.mm` | Syphon publisher (Objective-C++) |
 | `kinect_check.py` | standalone sensor check, works for v1 and v2 |

@@ -84,10 +84,12 @@ class HealthLog:
 
 
 class App:
-    def __init__(self, root, camera_kind="auto", synthetic_size=(640, 576)):
+    def __init__(self, root, camera_kind="auto", synthetic_size=(640, 576),
+                 synthetic_image=None):
         self.root = root
         self.camera_kind = camera_kind
         self.synthetic_size = synthetic_size
+        self.synthetic_image = synthetic_image
         self.cw, self.ch = 512, 424          # replaced once a camera opens
         self.latest_dims = (512, 424)
         self.go = True
@@ -160,6 +162,25 @@ class App:
                        activeforeground=FG, highlightthickness=0,
                        font=("Helvetica Neue", 12)).pack(side="left", padx=(10, 0))
 
+        trow = tk.Frame(panel, bg=BG)
+        trow.pack(fill="x", pady=(6, 0))
+        tk.Label(trow, text="Tracking", bg=BG, fg=DIM, width=11, anchor="w",
+                 font=("Helvetica Neue", 12)).pack(side="left")
+        self.track_pose = tk.BooleanVar(value=False)
+        self.track_hands = tk.BooleanVar(value=False)
+        self.track_gate = tk.BooleanVar(value=True)
+        for text, var in (("Body", self.track_pose), ("Hands", self.track_hands),
+                          ("Gate to slab", self.track_gate)):
+            tk.Checkbutton(trow, text=text, variable=var, bg=BG, fg=DIM,
+                           selectcolor=BG, activebackground=BG, activeforeground=FG,
+                           highlightthickness=0,
+                           font=("Helvetica Neue", 12)).pack(side="left", padx=(0, 8))
+        tk.Label(trow, text="OSC :", bg=BG, fg=DIM,
+                 font=("Helvetica Neue", 12)).pack(side="left", padx=(6, 0))
+        self.osc_port = tk.StringVar(value="9000")
+        tk.Entry(trow, textvariable=self.osc_port, width=6,
+                 font=("Helvetica Neue", 12)).pack(side="left")
+
         bar = tk.Frame(panel, bg=BG)
         bar.pack(fill="x", pady=(8, 0))
         self.retry = tk.Button(bar, text="Retry", command=self.open_sensor,
@@ -180,6 +201,9 @@ class App:
         # --- 3. sensor, with a Retry path. Missing hardware is the normal case
         # here, not an error worth a traceback - the sensor drops off USB
         # regularly and the user just replugs it.
+        self.tracker = None
+        self.t_pose = self.t_hands = False
+        self.t_gate = True
         self.chooser = None
         if self.camera_kind == "ask":
             self.show_chooser()
@@ -289,7 +313,8 @@ class App:
         self.root.update_idletasks()
         try:
             sensor = open_camera(self.camera_kind, colour=True,
-                                 synthetic_size=self.synthetic_size)
+                                 synthetic_size=self.synthetic_size,
+                                 synthetic_image=self.synthetic_image)
             sensor.enable_cloud(True)
         except Exception as exc:
             if self.camera_kind == "auto":
@@ -402,6 +427,16 @@ class App:
                 self.latest["colour"] = rgb
                 self.latest_dims = (w, h)
 
+                tr = self.tracker
+                if tr is not None and (self.t_pose or self.t_hands) and self.intrinsics:
+                    # Unmasked: MediaPipe was trained on ordinary photos, and our
+                    # background-removed cutout is out of distribution for it.
+                    # Depth is used to validate and lift, not to pre-mask.
+                    raw_rgb, raw_depth = sensor.raw_frame()
+                    if raw_rgb is not None:
+                        tr.submit(raw_rgb, raw_depth, self.intrinsics,
+                                  self.f_near, self.f_far)
+
                 if self.server is not None and self.jpeg is not None:
                     enc = {"depth": self.jpeg.encode(grey, w, h, True, 80)}
                     if rgb is not None:
@@ -437,6 +472,8 @@ class App:
         self.f_erode = self.vars["erode"].get()
         self.f_median = self.vars["median"].get()
 
+        self.sync_tracker()
+        self.draw_overlay()
         self.syphon.lib.syphon_pump()
         clients = (self.syphon.clients(DEPTH), self.syphon.clients(COLOUR),
                    self.syphon.clients(CLOUD))
@@ -458,7 +495,9 @@ class App:
 
         stalled = self.last_frame > 0 and time.monotonic() - self.last_frame > 5.0
         never = self.total == 0 and time.monotonic() - self.t0 > 15.0
-        if never:
+        if self.tracker is not None and self.tracker.error and (self.t_pose or self.t_hands):
+            self.status.configure(text=self.tracker.error[:90], fg=RED)
+        elif never:
             self.status.configure(text="NO FRAMES - sensor never started. Replug it.",
                                   fg=RED)
         elif stalled:
@@ -478,9 +517,11 @@ class App:
                 self.status.pack(side="left")
         else:
             self.status.configure(
-                text="%s   %.1f fps   Syphon: depth=%d colour=%d cloud=%d%s"
+                text="%s   %.1f fps   Syphon: depth=%d colour=%d cloud=%d%s%s"
                 % (self.serial, self.fps, clients[0], clients[1], clients[2],
-                   "   MJPEG :%d" % MJPEG_PORT if self.server else ""),
+                   "   MJPEG :%d" % MJPEG_PORT if self.server else "",
+                   ("   track %.0f fps %.0fms" % (self.tracker.fps, self.tracker.ms)
+                    if self.tracker and (self.t_pose or self.t_hands) else "")),
                 fg=GREEN if any(clients) else DIM)
         now = time.monotonic()
         if now - self.last_beat >= HEARTBEAT_S:
@@ -493,8 +534,63 @@ class App:
                               threading.active_count()))
         self.root.after(33, self.tick)
 
+    # --- tracking -------------------------------------------------------------
+
+    def sync_tracker(self):
+        """Mirror the Tracking row into plain attributes and the tracker.
+        Main thread only - the worker never touches Tk."""
+        self.t_pose, self.t_hands = self.track_pose.get(), self.track_hands.get()
+        self.t_gate = self.track_gate.get()
+        if (self.t_pose or self.t_hands) and self.tracker is None:
+            try:
+                port = int(self.osc_port.get())
+            except ValueError:
+                port = 9000
+            from tracker import Tracker
+            self.tracker = Tracker(port=port)
+            self.log.write("TRACKING", "started, OSC -> 127.0.0.1:%d" % port)
+            print("tracking: OSC -> 127.0.0.1:%d" % port, flush=True)
+        tr = self.tracker
+        if tr is None:
+            return
+        tr.want_pose, tr.want_hands, tr.gate = self.t_pose, self.t_hands, self.t_gate
+        try:
+            port = int(self.osc_port.get())
+            if port != tr.osc.addr[1]:
+                tr.osc.retarget("127.0.0.1", port)
+                self.log.write("TRACKING", "OSC -> 127.0.0.1:%d" % port)
+        except ValueError:
+            pass
+
+    def draw_overlay(self):
+        """Tracked landmarks over the preview, so you can see what TD gets."""
+        self.canvas.delete("overlay")
+        tr = self.tracker
+        if tr is None or not (self.t_pose or self.t_hands):
+            return
+        step = getattr(self, "preview_step", 1)
+        cw, ch = self.cw / step, self.ch / step
+        ov = tr.overlay
+        if self.t_pose and ov.get("pose") is not None:
+            from tracker import BONES
+            xs, ys = ov["pose"]
+            for a, b in BONES:
+                self.canvas.create_line(xs[a] * cw, ys[a] * ch, xs[b] * cw, ys[b] * ch,
+                                        fill=GREEN, width=2, tags="overlay")
+            for x, y in zip(xs, ys):
+                self.canvas.create_oval(x * cw - 3, y * ch - 3, x * cw + 3, y * ch + 3,
+                                        fill=GREEN, outline="", tags="overlay")
+        if self.t_hands:
+            for side, xs, ys in ov.get("hands", []):
+                col = AMBER if side == "left" else "#4aa8ff"
+                for x, y in zip(xs, ys):
+                    self.canvas.create_oval(x * cw - 2, y * ch - 2, x * cw + 2, y * ch + 2,
+                                            fill=col, outline="", tags="overlay")
+
     def quit(self):
         self.log.write("EXIT", "clean, %d frames" % self.total)
+        if self.tracker is not None:
+            self.tracker.close()
         self.go = False
         with self.cond:
             self.cond.notify_all()
@@ -515,13 +611,17 @@ if __name__ == "__main__":
                          "plugged in, for unattended runs")
     ap.add_argument("--size", default="640x576",
                     help="synthetic camera resolution, WxH")
+    ap.add_argument("--image", default=None,
+                    help="with --camera synthetic: replay this photo as the colour "
+                         "stream, e.g. to build a TD tracking patch without a camera")
     ap.add_argument("--mjpeg", action="store_true",
                     help="start the MJPEG server at launch (headless use)")
     args = ap.parse_args()
     size = tuple(int(v) for v in args.size.lower().split("x"))
 
     root = tk.Tk()
-    app = App(root, camera_kind=args.camera, synthetic_size=size)
+    app = App(root, camera_kind=args.camera, synthetic_size=size,
+              synthetic_image=args.image)
     if args.mjpeg:
         app.mjpeg_on.set(True)
         app.toggle_mjpeg()

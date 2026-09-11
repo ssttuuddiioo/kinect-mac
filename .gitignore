@@ -25,3 +25,6 @@ soak.out
 
 # Orbbec SDK log output
 Log/
+
+# MediaPipe models, fetched by build.sh
+models/
